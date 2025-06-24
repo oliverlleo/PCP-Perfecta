@@ -122,19 +122,19 @@ function processarArquivoTratamento(arquivo, clienteId) {
                     dados = criarItensDemonstracao(arquivo.name);
                 }
                 
-                // Salva os itens no Firebase como "Lista Tratamento"
-                salvarListaTratamentoNoFirebase(dados, clienteId)
-                    .then(() => {
+                // Mescla com a lista de tratamento existente antes de salvar
+                mesclarEsalvarListaTratamento(dados, clienteId)
+                    .then(listaMesclada => {
                         resolve({
                             sucesso: true,
-                            mensagem: `${dados.length} itens processados com sucesso`,
-                            itens: dados.length,
-                            dados: dados // Retorna os dados para uso na comparação
+                            mensagem: `${listaMesclada.length} itens na lista de tratamento após mesclagem.`,
+                            itens: listaMesclada.length, // Número de itens na lista mesclada
+                            dados: listaMesclada // Retorna a lista mesclada
                         });
                     })
                     .catch(error => {
-                        console.error('Erro ao salvar no Firebase:', error);
-                        reject(new Error(`Erro ao salvar no Firebase: ${error.message}`));
+                        console.error('Erro ao mesclar e salvar no Firebase:', error);
+                        reject(new Error(`Erro ao mesclar e salvar no Firebase: ${error.message}`));
                     });
             } catch (error) {
                 console.error('Erro ao processar arquivo:', error);
@@ -162,44 +162,84 @@ function processarArquivoTratamento(arquivo, clienteId) {
 }
 
 /**
- * Salva a Lista Tratamento no Firebase
+ * Mescla os novos itens com a ListaTratamento existente e salva no Firebase.
  * 
- * @param {Array} itens - Array de itens a serem salvos
- * @param {string} clienteId - ID do cliente
- * @returns {Promise} - Promise que resolve quando os itens forem salvos
+ * @param {Array} novosItens - Novos itens processados do arquivo.
+ * @param {string} clienteId - ID do cliente.
+ * @returns {Promise<Array>} - Promise que resolve com a lista de itens mesclada.
  */
-function salvarListaTratamentoNoFirebase(itens, clienteId) {
-    return new Promise((resolve, reject) => {
-        console.log(`Salvando ${itens.length} itens como Lista Tratamento para o cliente ${clienteId}...`);
-        
-        // Verifica se o dbRef está disponível
-        if (!window.dbRef || !window.dbRef.projetos) {
-            reject(new Error('Referência ao banco de dados não disponível'));
-            return;
+async function mesclarEsalvarListaTratamento(novosItens, clienteId) {
+    console.log(`Iniciando mesclagem da Lista Tratamento para o cliente ${clienteId}...`);
+
+    if (!window.dbRef || !window.dbRef.projetos) {
+        throw new Error('Referência ao banco de dados não disponível');
+    }
+
+    const listaTratamentoRef = window.dbRef.projetos.child(clienteId).child('Tratamento').child('listas').child('ListaTratamento');
+    let itensExistentes = [];
+
+    try {
+        const snapshot = await listaTratamentoRef.once('value');
+        const dadosListaExistente = snapshot.val();
+        if (dadosListaExistente && dadosListaExistente.itens && Array.isArray(dadosListaExistente.itens)) {
+            itensExistentes = dadosListaExistente.itens;
+            console.log(`Encontrados ${itensExistentes.length} itens existentes na Lista Tratamento.`);
+        } else {
+            console.log('Nenhuma Lista Tratamento existente encontrada ou está vazia.');
         }
-        
-        // Define o caminho para a Lista Tratamento
-        // Estrutura: projetos/{clienteId}/Tratamento/listas/ListaTratamento
-        const listaTratamentoRef = window.dbRef.projetos.child(clienteId).child('Tratamento').child('listas').child('ListaTratamento');
-        
-        // Adiciona timestamp para controle de versão
-        const dadosLista = {
-            timestamp: Date.now(),
-            itens: itens
-        };
-        
-        // Salva no Firebase
-        listaTratamentoRef.set(dadosLista)
-            .then(() => {
-                console.log('Lista Tratamento salva com sucesso no Firebase');
-                resolve();
-            })
-            .catch(error => {
-                console.error('Erro ao salvar Lista Tratamento no Firebase:', error);
-                reject(error);
-            });
+    } catch (error) {
+        console.error('Erro ao carregar Lista Tratamento existente:', error);
+        // Continuar com uma lista vazia se não puder carregar
+    }
+
+    const itensMescladosMap = new Map();
+
+    // Adiciona itens existentes ao mapa
+    itensExistentes.forEach(item => {
+        if (item.codigo) {
+            // Garante que a quantidade seja numérica
+            item.quantidade = parseInt(item.quantidade) || 0;
+            itensMescladosMap.set(item.codigo, item);
+        }
     });
+
+    // Mescla novos itens
+    novosItens.forEach(novoItem => {
+        if (novoItem.codigo) {
+            const quantidadeNova = parseInt(novoItem.quantidade) || 0;
+            if (itensMescladosMap.has(novoItem.codigo)) {
+                // Item já existe, soma as quantidades
+                const itemExistente = itensMescladosMap.get(novoItem.codigo);
+                itemExistente.quantidade += quantidadeNova;
+                // Atualiza outros campos se necessário (ex: descrição, se vier do novo arquivo)
+                itemExistente.descricao = novoItem.descricao || itemExistente.descricao;
+                // Adicione outros campos que devem ser atualizados aqui
+            } else {
+                // Novo item, adiciona ao mapa
+                novoItem.quantidade = quantidadeNova;
+                itensMescladosMap.set(novoItem.codigo, novoItem);
+            }
+        }
+    });
+
+    const listaFinalItens = Array.from(itensMescladosMap.values());
+    console.log(`Total de ${listaFinalItens.length} itens após mesclagem.`);
+
+    const dadosListaParaSalvar = {
+        timestamp: Date.now(),
+        itens: listaFinalItens
+    };
+
+    try {
+        await listaTratamentoRef.set(dadosListaParaSalvar);
+        console.log('Lista Tratamento mesclada e salva com sucesso no Firebase.');
+        return listaFinalItens; // Retorna a lista de itens mesclada
+    } catch (error) {
+        console.error('Erro ao salvar Lista Tratamento mesclada no Firebase:', error);
+        throw error; // Rejeita a promessa principal
+    }
 }
+
 
 /**
  * Compara os itens de todas as listas com a Lista Tratamento
@@ -230,104 +270,119 @@ function compararComListaTratamento(clienteId) {
                 
                 console.log(`Lista Tratamento encontrada com ${listaTratamento.itens.length} itens`);
                 
-                // Indexa os itens da Lista Tratamento por código para facilitar a busca
-                const itensTratamento = {};
+                // Indexa os itens da Lista Tratamento (agora mesclada) por código
+                const itensTratamentoMap = new Map();
                 listaTratamento.itens.forEach(item => {
                     if (item.codigo) {
-                        itensTratamento[item.codigo] = item;
+                        // Garante que a quantidade seja numérica
+                        item.quantidade = parseInt(item.quantidade) || 0;
+                        itensTratamentoMap.set(item.codigo, item);
                     }
                 });
-                
-                // Busca todos os itens do cliente
+
+                // Busca todos os projetos e listas do cliente
                 return window.dbRef.projetos.child(clienteId).once('value')
-                    .then(snapshotProjetos => {
+                    .then(async snapshotProjetos => { // Adicionado async aqui
                         const projetos = snapshotProjetos.val();
-                        
-                        // Verifica se existem projetos
+
                         if (!projetos) {
-                            reject(new Error('Nenhum projeto encontrado para este cliente'));
+                            console.warn('Nenhum projeto encontrado para este cliente durante a comparação.');
+                            resolve(); // Resolve pois não há o que comparar
                             return;
                         }
-                        
-                        // Array para armazenar as promessas de atualização
+
                         const promessasAtualizacao = [];
-                        
-                        // Para cada tipo de projeto
-                        Object.keys(projetos).forEach(tipo => {
-                            // Pula o tipo "Tratamento" para evitar recursão
-                            if (tipo === 'Tratamento') {
-                                return;
-                            }
-                            
+
+                        for (const tipo of Object.keys(projetos)) {
+                            if (tipo === 'Tratamento') continue; // Pula a própria lista de tratamento
+
                             const projeto = projetos[tipo];
-                            
-                            // Pula projetos terceirizados
-                            if (projeto.terceirizado) {
-                                return;
+                            if (projeto.terceirizado || !projeto.listas || objetoVazio(projeto.listas)) {
+                                continue;
                             }
-                            
-                            // Verifica se há listas
-                            if (projeto.listas && !objetoVazio(projeto.listas)) {
-                                // Para cada lista
-                                Object.keys(projeto.listas).forEach(nomeLista => {
-                                    const itens = projeto.listas[nomeLista];
-                                    
-                                    if (Array.isArray(itens) && itens.length > 0) {
-                                        // Para cada item da lista
-                                        itens.forEach((item, index) => {
-                                            // Busca o item na Lista Tratamento
-                                            const itemTratamento = itensTratamento[item.codigo];
+
+                            for (const nomeLista of Object.keys(projeto.listas)) {
+                                const itensDaListaProjeto = projeto.listas[nomeLista];
+
+                                if (Array.isArray(itensDaListaProjeto) && itensDaListaProjeto.length > 0) {
+                                    for (let i = 0; i < itensDaListaProjeto.length; i++) {
+                                        const itemProjeto = itensDaListaProjeto[i];
+                                        const caminhoItemFirebase = `${tipo}/listas/${nomeLista}/${i}`;
+
+                                        // Busca o estado atual do item no Firebase para obter empenhoAtual
+                                        // Esta é uma simplificação. O ideal seria ter esses dados já carregados ou fazer menos leituras.
+                                        // No entanto, para garantir a lógica correta com dados frescos:
+                                        const snapshotItemAtual = await window.dbRef.projetos.child(clienteId).child(caminhoItemFirebase).once('value');
+                                        const dadosItemAtual = snapshotItemAtual.val() || {};
+
+                                        const empenhoAtual = parseInt(dadosItemAtual.empenho) || 0;
+                                        // const necessidadeAtual = parseInt(dadosItemAtual.necessidade) || 0; // Não usado diretamente na nova lógica de cálculo, mas bom ter
+
+                                        const quantidadeNecessariaProjeto = parseInt(itemProjeto.quantidade) || 0;
+                                        let empenhoFinal = empenhoAtual; // Inicia com o empenho atual
+                                        let necessidadeFinal;
+                                        let statusFinal;
+
+                                        const itemTratamentoCorrespondente = itensTratamentoMap.get(itemProjeto.codigo);
+
+                                        if (itemTratamentoCorrespondente) {
+                                            // Item existe na Lista de Tratamento
+                                            const quantidadeDisponivelTratamento = itemTratamentoCorrespondente.quantidade;
                                             
-                                            // Define os valores padrão
-                                            let empenho = 0;
-                                            let necessidade = parseInt(item.quantidade) || 0;
-                                            let status = 'Compras';
+                                            // Quanto podemos empenhar deste item do projeto com base no estoque disponível
+                                            // e o que ainda falta ser empenhado para este item do projeto.
+                                            const necessidadePendente = Math.max(0, quantidadeNecessariaProjeto - empenhoAtual);
+                                            const podeEmpenharAdicional = Math.min(necessidadePendente, Math.max(0, quantidadeDisponivelTratamento - empenhoAtual));
                                             
-                                            // Se encontrou o item na Lista Tratamento
-                                            if (itemTratamento) {
-                                                const quantidadeTratamento = parseInt(itemTratamento.quantidade) || 0;
-                                                const quantidadeNecessaria = parseInt(item.quantidade) || 0;
-                                                
-                                                // Se a quantidade na Lista Tratamento é suficiente
-                                                if (quantidadeTratamento >= quantidadeNecessaria) {
-                                                    empenho = quantidadeNecessaria;
-                                                    necessidade = 0;
-                                                    status = 'Empenho';
-                                                } else {
-                                                    // Se a quantidade na Lista Tratamento é insuficiente
-                                                    empenho = quantidadeTratamento;
-                                                    necessidade = quantidadeNecessaria - quantidadeTratamento;
-                                                    status = 'Empenho/Compras';
-                                                }
-                                            }
+                                            empenhoFinal = empenhoAtual + podeEmpenharAdicional;
+
+                                            // Ajuste para não empenhar mais do que o necessário para o projeto
+                                            empenhoFinal = Math.min(empenhoFinal, quantidadeNecessariaProjeto);
                                             
-                                            // Caminho para o item no Firebase
-                                            const caminhoItem = `${tipo}/listas/${nomeLista}/${index}`;
-                                            
-                                            // Adiciona a promessa de atualização
+                                        } else {
+                                            // Item do projeto não existe na Lista de Tratamento (ou estoque zerado)
+                                            // Mantemos o empenhoAtual, pois a ausência na lista de tratamento não deve zerar empenhos.
+                                            // A necessidade será a quantidade total do projeto menos o que já estava empenhado.
+                                            // Isso assume que o empenhoAtual foi feito com base em um estoque que existia antes.
+                                            // Se um item some do estoque, não podemos mais empenhar nada novo para ele.
+                                        }
+
+                                        necessidadeFinal = Math.max(0, quantidadeNecessariaProjeto - empenhoFinal);
+
+                                        if (empenhoFinal >= quantidadeNecessariaProjeto) {
+                                            statusFinal = 'Empenho'; // Totalmente empenhado
+                                            necessidadeFinal = 0; // Garante que necessidade seja zero
+                                        } else if (empenhoFinal > 0) {
+                                            statusFinal = 'Empenho/Compras'; // Parcialmente empenhado
+                                        } else {
+                                            statusFinal = 'Compras'; // Nada empenhado
+                                        }
+
+                                        // Apenas atualiza se houver mudança para evitar escritas desnecessárias
+                                        if (dadosItemAtual.empenho !== empenhoFinal ||
+                                            dadosItemAtual.necessidade !== necessidadeFinal ||
+                                            dadosItemAtual.status !== statusFinal) {
                                             promessasAtualizacao.push(
-                                                window.dbRef.projetos.child(clienteId).child(caminhoItem).update({
-                                                    empenho: empenho,
-                                                    necessidade: necessidade,
-                                                    status: status
+                                                window.dbRef.projetos.child(clienteId).child(caminhoItemFirebase).update({
+                                                    empenho: empenhoFinal,
+                                                    necessidade: necessidadeFinal,
+                                                    status: statusFinal
                                                 })
                                             );
-                                        });
+                                        }
                                     }
-                                });
+                                }
                             }
-                        });
-                        
-                        // Aguarda todas as atualizações serem concluídas
+                        }
                         return Promise.all(promessasAtualizacao);
                     })
                     .then(() => {
-                        console.log('Comparação com Lista Tratamento concluída com sucesso');
+                        console.log('Comparação com Lista Tratamento (revisada) concluída com sucesso.');
                         resolve();
-                    });
+                    })
             })
             .catch(error => {
-                console.error('Erro ao comparar com Lista Tratamento:', error);
+                console.error('Erro ao comparar com Lista Tratamento (revisada):', error);
                 reject(error);
             });
     });
